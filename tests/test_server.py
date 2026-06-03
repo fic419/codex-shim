@@ -1188,6 +1188,34 @@ async def test_api_models_lists_configured_models_with_active_flag(
         await shim_client.close()
 
 
+async def test_desktop_models_returns_codex_desktop_model_list_response(
+    monkeypatch, tmp_path, auth_missing
+):
+    settings = _picker_settings_file(tmp_path)
+    _stub_codex_config(monkeypatch, tmp_path, model="deepseek-v4-pro")
+    shim_client = TestClient(TestServer(ShimServer(settings).app()))
+    await shim_client.start_server()
+    try:
+        resp = await shim_client.get("/api/desktop-models")
+        assert resp.status == 200
+        assert resp.headers["Access-Control-Allow-Origin"] == "*"
+        payload = await resp.json()
+        assert payload["nextCursor"] is None
+        data = payload["data"]
+        assert [m["model"] for m in data] == ["kimi-k26", "deepseek-v4-pro"]
+        active = {m["model"]: m["isDefault"] for m in data}
+        assert active == {"kimi-k26": False, "deepseek-v4-pro": True}
+        model = data[0]
+        assert model["id"] == "kimi-k26"
+        assert model["displayName"] == "Kimi K2.6"
+        assert model["hidden"] is False
+        assert model["defaultReasoningEffort"] == "medium"
+        assert model["inputModalities"] == ["text", "image"]
+        assert model["supportedReasoningEfforts"][0]["reasoningEffort"] == "low"
+    finally:
+        await shim_client.close()
+
+
 async def test_api_models_includes_chatgpt_when_auth_present(
     monkeypatch, tmp_path, auth_present
 ):

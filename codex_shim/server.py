@@ -80,6 +80,8 @@ class ShimServer:
         app.router.add_post("/v1/responses/compact", self.responses_compact)
         app.router.add_get("/picker", self.picker_page)
         app.router.add_get("/api/models", self.api_models)
+        app.router.add_get("/api/desktop-models", self.desktop_models)
+        app.router.add_options("/api/desktop-models", self.desktop_models_options)
         app.router.add_post("/api/switch", self.switch_model)
         return app
 
@@ -129,6 +131,23 @@ class ShimServer:
                 }
             )
         return web.json_response(data)
+
+    async def desktop_models_options(self, _request: web.Request) -> web.Response:
+        return web.Response(headers=_desktop_model_cors_headers())
+
+    async def desktop_models(self, _request: web.Request) -> web.Response:
+        current = _current_managed_model()
+        rows: list[dict[str, Any]] = []
+        if chatgpt_passthrough_available():
+            for slug, display_name in chatgpt_passthrough_display_names().items():
+                rows.append(_desktop_model(slug, display_name, "chatgpt", current == slug))
+        if cursor_passthrough_available():
+            for slug, display_name in cursor_passthrough_display_names().items():
+                rows.append(_desktop_model(slug, display_name, "cursor", current == slug))
+        for model in usable_byok_models(self.settings.load()):
+            rows.append(_desktop_model(model.slug, model.display_name, model.provider, current == model.slug, model))
+        print(f"[desktop-models] returning {len(rows)} models", flush=True)
+        return web.json_response({"data": rows, "nextCursor": None}, headers=_desktop_model_cors_headers())
 
     async def switch_model(self, request: web.Request) -> web.Response:
         try:
@@ -2044,6 +2063,50 @@ def _current_managed_model() -> str | None:
         if stripped.startswith("model = "):
             return stripped.split("=", 1)[1].strip().strip('"')
     return None
+
+
+def _desktop_model_cors_headers() -> dict[str, str]:
+    return {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "*",
+    }
+
+
+def _desktop_model(
+    slug: str,
+    display_name: str,
+    provider: str,
+    is_default: bool,
+    model: ShimModel | None = None,
+) -> dict[str, Any]:
+    context = model.max_context_limit if model and model.max_context_limit else 128_000
+    input_modalities = ["text"] if model and model.no_image_support else ["text", "image"]
+    return {
+        "id": slug,
+        "model": slug,
+        "upgrade": None,
+        "upgradeInfo": None,
+        "availabilityNux": None,
+        "displayName": display_name,
+        "description": f"{display_name} via Codex shim ({provider}).",
+        "hidden": False,
+        "supportedReasoningEfforts": [
+            {"reasoningEffort": "low", "description": "Faster, lighter reasoning"},
+            {"reasoningEffort": "medium", "description": "Balanced speed and reasoning"},
+            {"reasoningEffort": "high", "description": "Deeper reasoning"},
+            {"reasoningEffort": "xhigh", "description": "Maximum reasoning where supported"},
+        ],
+        "defaultReasoningEffort": "medium",
+        "inputModalities": input_modalities,
+        "supportsPersonality": False,
+        "additionalSpeedTiers": [],
+        "serviceTiers": [],
+        "defaultServiceTier": None,
+        "isDefault": is_default,
+        "contextWindow": context,
+        "maxContextWindow": context,
+    }
 
 
 _MODEL_LINE_RE = re.compile(r'(?m)^(\s*model\s*=\s*")[^"]*(")')
