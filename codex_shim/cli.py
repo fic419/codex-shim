@@ -23,6 +23,7 @@ from .cursor_passthrough import (
 )
 from .settings import (
     CHATGPT_MODEL_SLUG,
+    DEFAULT_CODEX_MODELS_CACHE,
     DEFAULT_SETTINGS,
     DEFAULT_HOST,
     DEFAULT_PORT,
@@ -63,15 +64,25 @@ APP_ASAR_BACKUP_NAME = "app.asar.before-codex-shim-model-picker-patch"
 INFO_PLIST_BACKUP_NAME = "Info.plist.before-codex-shim-model-picker-patch"
 SYSTEM_CODEX_APP = Path("/Applications/Codex.app")
 USER_CODEX_APP = Path.home() / "Applications" / "Codex.app"
-MODEL_PICKER_NEEDLE = "let u=c.useHiddenModels&&o!==`amazonBedrock`,d;"
-MODEL_PICKER_REPLACEMENT = "let u=!1,d;"
+MODEL_PICKER_NEEDLE = "let a=[],o=null,s=i&&e!==`amazonBedrock`;"
+LEGACY_MODEL_PICKER_NEEDLE = "let u=c.useHiddenModels&&o!==`amazonBedrock`,d;"
+MODEL_PICKER_REPLACEMENT = "let a=[],o=null,s=!1;"
+LEGACY_MODEL_PICKER_REPLACEMENT = "let u=!1,d;"
 SIDEBAR_RECENT_THREADS_NEEDLE = (
     "listRecentThreads({cursor:e,limit:t}){return this.params.requestClient.sendRequest(`thread/list`,"
-    "{limit:t,cursor:e,sortKey:this.recentConversationSortKey,modelProviders:null,archived:!1,sourceKinds:ke})}"
+    "{limit:t,cursor:e,sortKey:this.recentConversationSortKey,modelProviders:null,archived:!1,sourceKinds:he})}"
 )
 SIDEBAR_RECENT_THREADS_REPLACEMENT = (
     "listRecentThreads({cursor:e,limit:t}){return this.params.requestClient.sendRequest(`thread/list`,"
-    "{limit:t,cursor:e,sortKey:this.recentConversationSortKey,modelProviders:[],archived:!1,sourceKinds:ke})}"
+    "{limit:t,cursor:e,sortKey:this.recentConversationSortKey,modelProviders:[],archived:!1,sourceKinds:he})}"
+)
+MODEL_LIST_QUERY_NEEDLE = "queryFn:()=>i(`list-models-for-host`,{hostId:a,includeHidden:!0,cursor:null,limit:s})"
+MODEL_LIST_QUERY_REPLACEMENT = (
+    "queryFn:async()=>await fetch(`http://127.0.0.1:8765/api/desktop-models`).then(e=>e.json())"
+)
+WEBVIEW_CSP_NEEDLE = "connect-src &#39;self&#39; https://ab.chatgpt.com https://cdn.openai.com;"
+WEBVIEW_CSP_REPLACEMENT = (
+    "connect-src &#39;self&#39; http://127.0.0.1:8765 https://ab.chatgpt.com https://cdn.openai.com;"
 )
 
 
@@ -123,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
         code = start(args.settings, args.port)
         if code == 0 and args.command == "enable":
             install_codex_config(args.settings, args.port)
+            sync_codex_models_cache()
         return code
     if args.command in {"stop", "disable"}:
         if args.command == "disable":
@@ -148,6 +160,7 @@ def main(argv: list[str] | None = None) -> int:
             generate(args.settings, args.port)
             ensure_started(args.settings, args.port)
             install_codex_config(args.settings, args.port, args.model_slug)
+            sync_codex_models_cache()
             print(f"Active Codex shim model: {args.model_slug}")
             return 0
     if args.command == "codex":
@@ -159,6 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         generate(args.settings, args.port)
         ensure_started(args.settings, args.port)
         install_codex_config(args.settings, args.port, args.model_slug)
+        sync_codex_models_cache()
         exec_codex_app(args.settings, args.port, args.path)
         return 0
     return 2
@@ -223,6 +237,29 @@ def refresh_opencode_go(settings_path: Path, api_key_env: str, base_url: str, pr
     for row in result.models:
         print(f"  {row['slug']}  ->  {row['model']} ({row['provider']}, {row['opencode_go_endpoint']})")
     return 0
+
+
+def sync_codex_models_cache() -> None:
+    if not CATALOG_PATH.exists():
+        return
+    cache_path = DEFAULT_CODEX_MODELS_CACHE
+    catalog = json.loads(CATALOG_PATH.read_text())
+    payload = dict(catalog)
+    if cache_path.exists():
+        try:
+            existing = json.loads(cache_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+        if isinstance(existing, dict):
+            for key in ("fetched_at", "etag", "client_version"):
+                if key in existing:
+                    payload[key] = existing[key]
+            backup = cache_path.with_suffix(cache_path.suffix + ".before-codex-shim")
+            if not backup.exists():
+                backup.write_text(json.dumps(existing, indent=2, ensure_ascii=False) + "\n")
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+    print(f"Synced shim model catalog into {cache_path}.")
 
 
 def install_codex_config(settings_path: Path, port: int, model_slug: str | None = None) -> None:
@@ -458,6 +495,10 @@ def patch_codex_app() -> int:
     changed = _patch_codex_desktop_bundles(workdir)
     if changed is None:
         return 1
+    csp_changed = _patch_codex_desktop_csp(workdir)
+    if csp_changed is None:
+        return 1
+    changed = changed or csp_changed
     if changed:
         subprocess.run(["npx", "--yes", "asar", "pack", str(workdir), str(app_asar)], check=True)
         _update_app_asar_integrity(app_asar, info_plist)
@@ -526,23 +567,32 @@ def _patch_codex_desktop_bundles(workdir: Path) -> bool | None:
         (
             "model picker allowlist filter",
             ["model-queries-*.js", "*.js"],
-            MODEL_PICKER_NEEDLE,
+            (MODEL_PICKER_NEEDLE, LEGACY_MODEL_PICKER_NEEDLE),
+            (MODEL_PICKER_REPLACEMENT, LEGACY_MODEL_PICKER_REPLACEMENT),
             MODEL_PICKER_REPLACEMENT,
         ),
         (
             "shim-mode sidebar provider filter",
             ["app-server-manager-signals-*.js", "*.js"],
-            SIDEBAR_RECENT_THREADS_NEEDLE,
+            (SIDEBAR_RECENT_THREADS_NEEDLE,),
+            (SIDEBAR_RECENT_THREADS_REPLACEMENT,),
             SIDEBAR_RECENT_THREADS_REPLACEMENT,
+        ),
+        (
+            "shim desktop model list source",
+            ["model-queries-*.js", "*.js"],
+            (MODEL_LIST_QUERY_NEEDLE,),
+            (MODEL_LIST_QUERY_REPLACEMENT,),
+            MODEL_LIST_QUERY_REPLACEMENT,
         ),
     ]
     changed = False
-    for label, globs, needle, replacement in patches:
-        bundle_file = _find_js_bundle(workdir, globs, needle, replacement)
+    for label, globs, needles, patched_markers, replacement in patches:
+        bundle_file = _find_js_bundle(workdir, globs, needles, patched_markers)
         if bundle_file is None:
             print(f"Could not find the expected {label} in Codex Desktop.", file=sys.stderr)
             return None
-        result = _replace_once(bundle_file, needle, replacement)
+        result = _replace_once_any(bundle_file, needles, patched_markers, replacement)
         if result is None:
             print(f"Could not patch the expected {label} in Codex Desktop.", file=sys.stderr)
             return None
@@ -554,7 +604,23 @@ def _patch_codex_desktop_bundles(workdir: Path) -> bool | None:
     return changed
 
 
-def _find_js_bundle(workdir: Path, globs: list[str], needle: str, replacement: str) -> Path | None:
+def _patch_codex_desktop_csp(workdir: Path) -> bool | None:
+    index = workdir / "webview" / "index.html"
+    if not index.exists():
+        print("Could not find Codex Desktop webview index.html for CSP patch.", file=sys.stderr)
+        return None
+    result = _replace_once(index, WEBVIEW_CSP_NEEDLE, WEBVIEW_CSP_REPLACEMENT)
+    if result is None:
+        print("Could not patch Codex Desktop webview CSP for shim model endpoint.", file=sys.stderr)
+        return None
+    if result:
+        print("Patched Codex Desktop webview CSP for shim model endpoint.")
+    else:
+        print("Codex Desktop webview CSP patch is already applied.")
+    return result
+
+
+def _find_js_bundle(workdir: Path, globs: list[str], needles: tuple[str, ...], patched_markers: tuple[str, ...]) -> Path | None:
     assets_dir = workdir / "webview" / "assets"
     if not assets_dir.exists():
         return None
@@ -563,7 +629,7 @@ def _find_js_bundle(workdir: Path, globs: list[str], needle: str, replacement: s
         candidates.extend(p for p in sorted(assets_dir.glob(pattern)) if p not in candidates)
     for path in candidates:
         text = _read_text_lossy(path)
-        if needle in text or replacement in text:
+        if any(needle in text for needle in needles) or any(marker in text for marker in patched_markers):
             return path
     return None
 
@@ -575,6 +641,24 @@ def _replace_once(path: Path, needle: str, replacement: str) -> bool | None:
     count = text.count(needle)
     if count != 1:
         return None
+    path.write_text(text.replace(needle, replacement, 1))
+    return True
+
+
+def _replace_once_any(
+    path: Path,
+    needles: tuple[str, ...],
+    patched_markers: tuple[str, ...],
+    replacement: str,
+) -> bool | None:
+    text = _read_text_lossy(path)
+    if any(marker in text for marker in patched_markers):
+        return False
+    matches = [(needle, text.count(needle)) for needle in needles]
+    present = [(needle, count) for needle, count in matches if count]
+    if len(present) != 1 or present[0][1] != 1:
+        return None
+    needle = present[0][0]
     path.write_text(text.replace(needle, replacement, 1))
     return True
 
@@ -930,7 +1014,7 @@ def _healthy(port: int) -> bool:
 
 def _health(port: int) -> dict | None:
     try:
-        with urlopen(f"http://{DEFAULT_HOST}:{port}/health", timeout=0.5) as response:
+        with urlopen(f"http://{DEFAULT_HOST}:{port}/health", timeout=5) as response:
             if response.status != 200:
                 return None
             return json.loads(response.read().decode("utf-8"))

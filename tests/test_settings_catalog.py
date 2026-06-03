@@ -485,24 +485,49 @@ def test_restore_app_fails_off_macos(monkeypatch, capsys):
 def test_desktop_bundle_patch_applies_model_picker_and_sidebar(tmp_path):
     assets = tmp_path / "webview" / "assets"
     assets.mkdir(parents=True)
+    (tmp_path / "webview" / "index.html").write_text(cli.WEBVIEW_CSP_NEEDLE)
     model_bundle = assets / "model-queries-test.js"
     sidebar_bundle = assets / "app-server-manager-signals-test.js"
-    model_bundle.write_text(f"before {cli.MODEL_PICKER_NEEDLE} after")
+    model_bundle.write_text(
+        f"before {cli.MODEL_PICKER_NEEDLE} middle {cli.MODEL_LIST_QUERY_NEEDLE} after"
+    )
     sidebar_bundle.write_text(f"before {cli.SIDEBAR_RECENT_THREADS_NEEDLE} after")
 
     assert cli._patch_codex_desktop_bundles(tmp_path) is True
-    assert cli.MODEL_PICKER_REPLACEMENT in model_bundle.read_text()
+    model_text = model_bundle.read_text()
+    assert cli.MODEL_PICKER_REPLACEMENT in model_text
+    assert cli.MODEL_LIST_QUERY_REPLACEMENT in model_text
     assert cli.SIDEBAR_RECENT_THREADS_REPLACEMENT in sidebar_bundle.read_text()
+    assert cli._patch_codex_desktop_csp(tmp_path) is True
+    assert cli.WEBVIEW_CSP_REPLACEMENT in (tmp_path / "webview" / "index.html").read_text()
     assert cli._patch_codex_desktop_bundles(tmp_path) is False
+    assert cli._patch_codex_desktop_csp(tmp_path) is False
 
 
 def test_desktop_bundle_patch_fails_when_sidebar_needle_is_missing(tmp_path):
     assets = tmp_path / "webview" / "assets"
     assets.mkdir(parents=True)
-    (assets / "model-queries-test.js").write_text(cli.MODEL_PICKER_NEEDLE)
+    (tmp_path / "webview" / "index.html").write_text(cli.WEBVIEW_CSP_NEEDLE)
+    (assets / "model-queries-test.js").write_text(
+        f"{cli.MODEL_PICKER_NEEDLE} {cli.MODEL_LIST_QUERY_NEEDLE}"
+    )
     (assets / "app-server-manager-signals-test.js").write_text("different build")
 
     assert cli._patch_codex_desktop_bundles(tmp_path) is None
+
+
+def test_desktop_bundle_patch_fails_when_model_list_needle_is_missing(tmp_path):
+    assets = tmp_path / "webview" / "assets"
+    assets.mkdir(parents=True)
+    (tmp_path / "webview" / "index.html").write_text(cli.WEBVIEW_CSP_NEEDLE)
+    (assets / "model-queries-test.js").write_text(cli.MODEL_PICKER_NEEDLE)
+    (assets / "app-server-manager-signals-test.js").write_text(cli.SIDEBAR_RECENT_THREADS_NEEDLE)
+
+    assert cli._patch_codex_desktop_bundles(tmp_path) is None
+
+
+def test_desktop_csp_patch_fails_when_index_is_missing(tmp_path):
+    assert cli._patch_codex_desktop_csp(tmp_path) is None
 
 
 def test_update_app_asar_integrity_uses_asar_json_header_hash(tmp_path):
