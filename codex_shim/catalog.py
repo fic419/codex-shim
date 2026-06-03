@@ -25,58 +25,60 @@ def catalog_entry(model: ShimModel) -> dict:
     compact = max(8_000, int(context * 0.8))
     truncation = min(64_000, max(8_000, int(context * 0.32)))
     reasoning = _reasoning_effort(model)
-    return {
-        "slug": model.slug,
-        "display_name": model.display_name,
-        "description": f"{model.display_name} via local Codex shim.",
-        "context_window": context,
-        "max_context_window": context,
-        "auto_compact_token_limit": compact,
-        "truncation_policy": {"mode": "tokens", "limit": truncation},
-        "default_reasoning_level": reasoning,
-        "supported_reasoning_levels": [
-            {"effort": "low", "description": "Faster, lighter reasoning"},
-            {"effort": "medium", "description": "Balanced speed and reasoning"},
-            {"effort": "high", "description": "Deeper reasoning"},
-            {"effort": "xhigh", "description": "Maximum reasoning where supported"},
-        ],
-        "default_reasoning_summary": "none",
-        "reasoning_summary_format": "none",
-        "supports_reasoning_summaries": False,
-        "default_verbosity": "low",
-        "support_verbosity": False,
-        "apply_patch_tool_type": "freeform",
-        "web_search_tool_type": "text_and_image",
-        "supports_search_tool": False,
-        "supports_parallel_tool_calls": True,
-        "experimental_supported_tools": [],
-        "input_modalities": ["text"] if model.no_image_support else ["text", "image"],
-        "supports_image_detail_original": not model.no_image_support,
-        "shell_type": "shell_command",
-        "visibility": "list",
-        "minimal_client_version": "0.0.1",
-        "supported_in_api": True,
-        "availability_nux": None,
-        "upgrade": None,
-        "priority": max(1, 1000 - model.index),
-        "prefer_websockets": False,
-        "available_in_plans": PLAN_TIERS,
-        "base_instructions": "You are a coding agent running in Codex through a local BYOK shim.",
-        "model_messages": {
-            "instructions_template": (
-                "You are Codex running on {model_name} through a local all-model shim. "
-                "Be a helpful, direct coding collaborator."
-            ),
-            "instructions_variables": {"model_name": model.display_name},
-        },
-    }
+    return _desktop_compat_entry(
+        {
+            "slug": model.slug,
+            "display_name": model.display_name,
+            "description": f"{model.display_name} via local Codex shim.",
+            "context_window": context,
+            "max_context_window": context,
+            "auto_compact_token_limit": compact,
+            "truncation_policy": {"mode": "tokens", "limit": truncation},
+            "default_reasoning_level": reasoning,
+            "supported_reasoning_levels": [
+                {"effort": "low", "description": "Faster, lighter reasoning"},
+                {"effort": "medium", "description": "Balanced speed and reasoning"},
+                {"effort": "high", "description": "Deeper reasoning"},
+                {"effort": "xhigh", "description": "Maximum reasoning where supported"},
+            ],
+            "default_reasoning_summary": "none",
+            "reasoning_summary_format": "none",
+            "supports_reasoning_summaries": False,
+            "default_verbosity": "low",
+            "support_verbosity": False,
+            "apply_patch_tool_type": "freeform",
+            "web_search_tool_type": "text_and_image",
+            "supports_search_tool": False,
+            "supports_parallel_tool_calls": True,
+            "experimental_supported_tools": [],
+            "input_modalities": ["text"] if model.no_image_support else ["text", "image"],
+            "supports_image_detail_original": not model.no_image_support,
+            "shell_type": "shell_command",
+            "visibility": "list",
+            "minimal_client_version": "0.0.1",
+            "supported_in_api": True,
+            "availability_nux": None,
+            "upgrade": None,
+            "priority": max(1, 1000 - model.index),
+            "prefer_websockets": False,
+            "available_in_plans": PLAN_TIERS,
+            "base_instructions": "You are a coding agent running in Codex through a local BYOK shim.",
+            "model_messages": {
+                "instructions_template": (
+                    "You are Codex running on {model_name} through a local all-model shim. "
+                    "Be a helpful, direct coding collaborator."
+                ),
+                "instructions_variables": {"model_name": model.display_name},
+            },
+        }
+    )
 
 
 def chatgpt_passthrough_entries() -> list[dict]:
     """Catalog entries for GPT models routed through ChatGPT passthrough."""
     entries: list[dict] = []
     for raw in load_chatgpt_passthrough_catalog_models():
-        entry = dict(raw)
+        entry = _desktop_compat_entry(dict(raw))
         entry["visibility"] = "list"
         entry.setdefault("available_in_plans", PLAN_TIERS)
         entry.setdefault("minimal_client_version", "0.0.1")
@@ -104,7 +106,7 @@ def write_catalog(models: list[ShimModel], path: Path, router_config=None) -> Pa
     if chatgpt_passthrough_available():
         entries.extend(chatgpt_passthrough_entries())
     if cursor_passthrough_available():
-        entry = cursor_catalog_entry()
+        entry = _desktop_compat_entry(cursor_catalog_entry())
         entry["isDefault"] = not chatgpt_passthrough_available()
         entries.append(entry)
     entries.extend(catalog_entry(model) for model in usable_byok_models(models))
@@ -176,6 +178,38 @@ def _reasoning_effort(model: ShimModel) -> str:
     return "medium"
 
 
+def _desktop_compat_entry(entry: dict) -> dict:
+    """Keep generated catalogs readable by older and newer Codex Desktop builds."""
+    slug = str(entry.get("slug") or entry.get("model") or "")
+    if slug:
+        entry.setdefault("slug", slug)
+        entry.setdefault("model", slug)
+    display_name = entry.get("display_name") or entry.get("displayName") or slug
+    if display_name:
+        entry.setdefault("display_name", display_name)
+        entry.setdefault("displayName", display_name)
+    if entry.get("visibility") == "hidden":
+        entry.setdefault("hidden", True)
+    else:
+        entry.setdefault("hidden", False)
+    if "supportedReasoningEfforts" not in entry:
+        levels = entry.get("supported_reasoning_levels") or []
+        efforts = []
+        for level in levels:
+            if not isinstance(level, dict):
+                continue
+            effort = level.get("effort") or level.get("reasoningEffort")
+            if effort:
+                efforts.append(
+                    {
+                        "reasoningEffort": effort,
+                        "description": level.get("description") or str(effort),
+                    }
+                )
+        if efforts:
+            entry["supportedReasoningEfforts"] = efforts
+    return entry
+
+
 def _toml_escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
-
