@@ -70,11 +70,11 @@ MODEL_PICKER_REPLACEMENT = "let a=[],o=null,s=!1;"
 LEGACY_MODEL_PICKER_REPLACEMENT = "let u=!1,d;"
 SIDEBAR_RECENT_THREADS_NEEDLE = (
     "listRecentThreads({cursor:e,limit:t}){return this.params.requestClient.sendRequest(`thread/list`,"
-    "{limit:t,cursor:e,sortKey:this.recentConversationSortKey,modelProviders:null,archived:!1,sourceKinds:he})}"
+    "{limit:t,cursor:e,sortKey:this.recentConversationSortKey,modelProviders:null,archived:!1,sourceKinds:pe})}"
 )
 SIDEBAR_RECENT_THREADS_REPLACEMENT = (
     "listRecentThreads({cursor:e,limit:t}){return this.params.requestClient.sendRequest(`thread/list`,"
-    "{limit:t,cursor:e,sortKey:this.recentConversationSortKey,modelProviders:[],archived:!1,sourceKinds:he})}"
+    "{limit:t,cursor:e,sortKey:this.recentConversationSortKey,modelProviders:[],archived:!1,sourceKinds:pe})}"
 )
 MODEL_LIST_QUERY_NEEDLE = "queryFn:()=>i(`list-models-for-host`,{hostId:a,includeHidden:!0,cursor:null,limit:s})"
 MODEL_LIST_QUERY_REPLACEMENT = (
@@ -84,6 +84,10 @@ WEBVIEW_CSP_NEEDLE = "connect-src &#39;self&#39; https://ab.chatgpt.com https://
 WEBVIEW_CSP_REPLACEMENT = (
     "connect-src &#39;self&#39; http://127.0.0.1:8765 https://ab.chatgpt.com https://cdn.openai.com;"
 )
+# Desktop overwrites features.js_repl in config.toml on every startup.
+# Remove it from the Ai sync array so the user's value is preserved.
+MAIN_JS_REPL_OVERWRITE_NEEDLE = "var Ai=[`features.js_repl`,`mcp_servers.${t.Pn}`]"
+MAIN_JS_REPL_OVERWRITE_REPLACEMENT = "var Ai=[`mcp_servers.${t.Pn}`]"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -141,7 +145,9 @@ def main(argv: list[str] | None = None) -> int:
             restore_codex_config()
         return stop()
     if args.command == "restart":
-        stop()
+        if stop() != 0:
+            print("Previous shim did not stop cleanly. Aborting restart.", file=sys.stderr)
+            return 1
         generate(args.settings, args.port)
         return start(args.settings, args.port)
     if args.command == "status":
@@ -317,9 +323,12 @@ def list_models(settings_path: Path) -> int:
 
 
 def start(settings_path: Path, port: int) -> int:
-    if _pid_running(_read_pid()):
-        print(f"Shim already running with pid {_read_pid()}.")
+    old_pid = _read_pid()
+    if _pid_running(old_pid):
+        print(f"Shim already running with pid {old_pid}.")
         return 0
+    _clear_stale_pid()
+    _kill_port_processes(port, DEFAULT_HOST, skip_pid=old_pid)
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     log = LOG_PATH.open("ab")
     cmd = [
@@ -399,10 +408,21 @@ def status(port: int) -> int:
 
 
 def ensure_started(settings_path: Path, port: int) -> None:
-    if not (_pid_running(_read_pid()) and _healthy(port)):
-        code = start(settings_path, port)
-        if code:
-            raise SystemExit(code)
+    pid = _read_pid()
+    if _pid_running(pid):
+        if _healthy(port):
+            return  # all good
+        # PID alive but unresponsive -> kill gracefully first
+        print(f"Shim pid {pid} is running but unresponsive. Sending SIGTERM...", file=sys.stderr)
+        _terminate_pid(pid)
+        for _ in range(25):
+            if not _pid_running(pid):
+                break
+            time.sleep(0.2)
+        _clear_stale_pid()
+    code = start(settings_path, port)
+    if code:
+        raise SystemExit(code)
 
 
 def exec_codex(settings_path: Path, port: int, codex_args: list[str]) -> None:
@@ -498,7 +518,10 @@ def patch_codex_app() -> int:
     csp_changed = _patch_codex_desktop_csp(workdir)
     if csp_changed is None:
         return 1
-    changed = changed or csp_changed
+    main_repl_changed = _patch_main_js_repl_overwrite(workdir)
+    if main_repl_changed is None:
+        return 1
+    changed = changed or csp_changed or main_repl_changed
     if changed:
         subprocess.run(["npx", "--yes", "asar", "pack", str(workdir), str(app_asar)], check=True)
         _update_app_asar_integrity(app_asar, info_plist)
@@ -618,6 +641,28 @@ def _patch_codex_desktop_csp(workdir: Path) -> bool | None:
     else:
         print("Codex Desktop webview CSP patch is already applied.")
     return result
+
+
+def _patch_main_js_repl_overwrite(workdir: Path) -> bool | None:
+    vite_dir = workdir / ".vite" / "build"
+    if not vite_dir.exists():
+        print("Could not find Codex Desktop .vite/build for js_repl overwrite patch.", file=sys.stderr)
+        return None
+    candidates = sorted(vite_dir.glob("main-*.js"))
+    for path in candidates:
+        text = _read_text_lossy(path)
+        if MAIN_JS_REPL_OVERWRITE_NEEDLE in text:
+            result = _replace_once(path, MAIN_JS_REPL_OVERWRITE_NEEDLE, MAIN_JS_REPL_OVERWRITE_REPLACEMENT)
+            if result is None:
+                print("Could not patch js_repl overwrite in Codex Desktop.", file=sys.stderr)
+                return None
+            if result:
+                print("Patched Codex Desktop js_repl overwrite.")
+            else:
+                print("Codex Desktop js_repl overwrite patch is already applied.")
+            return result
+    print("Could not find js_repl overwrite needle in Codex Desktop main bundles.", file=sys.stderr)
+    return None
 
 
 def _find_js_bundle(workdir: Path, globs: list[str], needles: tuple[str, ...], patched_markers: tuple[str, ...]) -> Path | None:
@@ -910,6 +955,37 @@ def _terminate_pid(pid: int) -> None:
                 ctypes.windll.kernel32.CloseHandle(handle)
         return
     os.kill(pid, signal.SIGTERM)
+
+
+def _kill_port_processes(port: int, host: str = DEFAULT_HOST, skip_pid: int | None = None) -> None:
+    """Kill any process listening on the given port so `start` recovers from stale state.
+    `skip_pid` is the known shim PID that should NOT be killed (already sent SIGTERM)."""
+    if os.name == "nt":
+        return  # lsof is macOS/Linux only; skip on Windows
+    try:
+        result = subprocess.run(
+            ["lsof", "-t", "-i", f"tcp@{host}:{port}", "-s", "TCP:LISTEN"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.strip().splitlines():
+            pid_str = line.strip()
+            if not pid_str:
+                continue
+            pid = int(pid_str)
+            if pid and pid != os.getpid() and pid != skip_pid:
+                _terminate_pid(pid)
+                time.sleep(0.2)
+    except Exception:
+        pass  # best-effort cleanup; failure here is not fatal
+
+def _clear_stale_pid() -> None:
+    """Remove PID file if the process it references is no longer alive."""
+    pid = _read_pid()
+    if pid is not None and not _pid_running(pid):
+        try:
+            PID_PATH.unlink()
+        except Exception:
+            pass  # best-effort
 
 
 def _override_args(settings_path: Path, port: int) -> list[str]:

@@ -348,6 +348,32 @@ def test_function_call_output_visual_feedback_adds_followup_image_message():
     }
 
 
+def test_responses_to_anthropic_keeps_parallel_tool_results_adjacent_before_visual_feedback():
+    body = {
+        "model": "slug",
+        "input": [
+            {"type": "function_call", "call_id": "call_1", "name": "view_image", "arguments": "{}"},
+            {"type": "function_call", "call_id": "call_2", "name": "exec_command", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call_1", "output": [{"type": "input_image", "image_url": "data:image/png;base64,CCC"}]},
+            {"type": "function_call_output", "call_id": "call_2", "output": "done"},
+        ],
+    }
+
+    out = responses_to_anthropic(body, "claude-real", 123)
+
+    assert out["messages"][0]["role"] == "assistant"
+    assert [block["id"] for block in out["messages"][0]["content"]] == ["call_1", "call_2"]
+    assert out["messages"][1]["role"] == "user"
+    assert out["messages"][1]["content"][:2] == [
+        {"type": "tool_result", "tool_use_id": "call_1", "content": "[image]"},
+        {"type": "tool_result", "tool_use_id": "call_2", "content": "done"},
+    ]
+    assert out["messages"][1]["content"][2:] == [
+        {"type": "text", "text": "Visual tool output for call_1."},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "CCC"}},
+    ]
+
+
 def test_responses_to_anthropic_preserves_visual_feedback_as_image_blocks():
     body = {
         "model": "slug",

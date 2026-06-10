@@ -93,7 +93,7 @@ def _minimal_chatgpt_passthrough_entry(slug: str, display_name: str) -> dict[str
         "web_search_tool_type": "text_and_image",
         "supports_search_tool": True,
         "supports_parallel_tool_calls": True,
-        "experimental_supported_tools": [],
+        "experimental_supported_tools": ["computer_use", "web_search", "apply_patch", "local_shell"],
         "input_modalities": ["text", "image"],
         "supports_image_detail_original": True,
         "shell_type": "shell_command",

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import socket
 import sys
 import time
 import uuid
@@ -11,6 +13,19 @@ from typing import Any
 from urllib.parse import urljoin
 
 from aiohttp import ClientSession, ClientTimeout, web
+
+def _should_trust_env() -> bool:
+    """Check if local Veee desktop proxy (127.0.0.1:15236) is running.
+    If yes, use trust_env=True so aiohttp can pick up HTTP_PROXY env vars.
+    If no, use trust_env=_should_trust_env() to connect directly (router VPN handles it)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.2)
+        result = s.connect_ex(("127.0.0.1", 15236))
+        s.close()
+        return result == 0
+    except Exception:
+        return False
 
 from .cursor_passthrough import (
     CURSOR_MODEL_SLUG,
@@ -506,7 +521,7 @@ class ShimServer:
             "session_id": request.headers.get("session_id", ""),
         }
         url = "https://chatgpt.com/backend-api/codex/responses"
-        async with ClientSession(timeout=self.timeout) as session:
+        async with ClientSession(timeout=self.timeout, trust_env=_should_trust_env()) as session:
             upstream = await session.post(url, json=forwarded, headers=headers)
             if upstream.status >= 400:
                 return await _error_response(upstream)
@@ -572,7 +587,7 @@ class ShimServer:
             "session_id": request.headers.get("session_id", ""),
         }
         url = "https://chatgpt.com/backend-api/codex/responses/compact"
-        async with ClientSession(timeout=self.timeout) as session:
+        async with ClientSession(timeout=self.timeout, trust_env=_should_trust_env()) as session:
             upstream = await session.post(url, json=forwarded, headers=headers)
             if upstream.status >= 400:
                 return await _error_response(upstream)
@@ -762,7 +777,7 @@ class ShimServer:
         url = _join_url(route.base_url, "/chat/completions")
         headers = _openai_headers(route)
         _dump_debug_request(route.slug, url, body)
-        async with ClientSession(timeout=self.timeout) as session:
+        async with ClientSession(timeout=self.timeout, trust_env=_should_trust_env()) as session:
             upstream = await session.post(url, json=body, headers=headers)
             if upstream.status >= 400:
                 return await _error_response(upstream, slug=route.slug)
@@ -793,7 +808,7 @@ class ShimServer:
     ) -> web.StreamResponse:
         url = _join_url(route.base_url, "/messages")
         headers = _anthropic_headers(route)
-        async with ClientSession(timeout=self.timeout) as session:
+        async with ClientSession(timeout=self.timeout, trust_env=_should_trust_env()) as session:
             upstream = await session.post(url, json=body, headers=headers)
             if upstream.status >= 400:
                 return await _error_response(upstream)
@@ -2106,6 +2121,7 @@ def _desktop_model(
         "isDefault": is_default,
         "contextWindow": context,
         "maxContextWindow": context,
+        "experimental_supported_tools": ["computer_use", "web_search", "apply_patch", "local_shell"],
     }
 
 

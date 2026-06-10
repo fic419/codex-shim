@@ -449,15 +449,23 @@ def _responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
         return [{"role": "user", "content": _responses_content_to_chat_content(value)}]
     messages: list[dict[str, Any]] = []
     pending_tool_calls: list[dict[str, Any]] = []
+    pending_visual_feedback: list[list[dict[str, Any]]] = []
 
     def flush_pending_assistant_tool_calls():
         if pending_tool_calls:
             messages.append({"role": "assistant", "content": None, "tool_calls": list(pending_tool_calls)})
             pending_tool_calls.clear()
 
+    def flush_pending_visual_feedback():
+        if pending_visual_feedback:
+            for content in pending_visual_feedback:
+                messages.append({"role": "user", "content": content})
+            pending_visual_feedback.clear()
+
     for item in value:
         if isinstance(item, str):
             flush_pending_assistant_tool_calls()
+            flush_pending_visual_feedback()
             messages.append({"role": "user", "content": item})
             continue
         if not isinstance(item, dict):
@@ -465,17 +473,21 @@ def _responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
         item_type = item.get("type")
         if item_type in {"message", None} and "role" in item:
             flush_pending_assistant_tool_calls()
+            flush_pending_visual_feedback()
             role = item.get("role", "user")
             if role == "developer":
                 role = "system"
             messages.append({"role": role, "content": _responses_content_to_chat_content(item.get("content", ""))})
         elif item_type in {"input_text", "text", "input_image"}:
             flush_pending_assistant_tool_calls()
+            flush_pending_visual_feedback()
             messages.append({"role": "user", "content": _responses_content_to_chat_content(item)})
         elif item_type == "computer_call_output":
             flush_pending_assistant_tool_calls()
+            flush_pending_visual_feedback()
             messages.append({"role": "user", "content": _computer_output_to_chat_content(item)})
         elif item_type == "function_call":
+            flush_pending_visual_feedback()
             # Coalesce consecutive function_call items into a single assistant
             # message with multiple tool_calls so chat-completions upstreams
             # accept the subsequent tool messages.
@@ -495,12 +507,13 @@ def _responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
             output = item.get("output", "")
             messages.append({"role": "tool", "tool_call_id": item.get("call_id"), "content": _content_to_text(output)})
             if _has_visual_content(output):
-                messages.append({"role": "user", "content": _visual_feedback_chat_content(output, item.get("call_id"))})
+                pending_visual_feedback.append(_visual_feedback_chat_content(output, item.get("call_id")))
         elif item_type == "reasoning":
             # For Chat-Completions upstreams reasoning is informational only.
             # We keep it as a marker so the Anthropic translator can reattach
             # encrypted_content as a `thinking` block on the assistant turn.
             flush_pending_assistant_tool_calls()
+            flush_pending_visual_feedback()
             messages.append(
                 {
                     "role": "assistant",
@@ -511,6 +524,7 @@ def _responses_input_to_messages(value: Any) -> list[dict[str, Any]]:
                 }
             )
     flush_pending_assistant_tool_calls()
+    flush_pending_visual_feedback()
     return messages
 
 
