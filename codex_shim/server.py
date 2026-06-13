@@ -102,6 +102,7 @@ class ShimServer:
         app.router.add_get("/picker", self.picker_page)
         app.router.add_get("/api/models", self.api_models)
         app.router.add_post("/api/switch", self.switch_model)
+        app.router.add_get("/api/desktop-models", self.desktop_models)
         return app
 
     async def picker_page(self, _request: web.Request) -> web.Response:
@@ -150,6 +151,47 @@ class ShimServer:
                 }
             )
         return web.json_response(data)
+
+    async def desktop_models(self, _request: web.Request) -> web.Response:
+        """Legacy endpoint for Codex Desktop model picker.
+        Returns same data as api_models but wrapped in {data, nextCursor} format."""
+        current = _current_managed_model()
+        rows: list[dict[str, Any]] = []
+        router_config = self._active_router()
+        if router_config is not None:
+            rows.append({
+                "id": router_config.slug, "object": "model",
+                "slug": router_config.slug, "display_name": router_config.display_name,
+                "provider": "auto", "active": current == router_config.slug,
+                "capabilities": {"supports_image_input": False, "supports_audio_input": False},
+            })
+        if chatgpt_passthrough_available():
+            for slug, display_name in chatgpt_passthrough_display_names().items():
+                rows.append({
+                    "id": slug, "object": "model",
+                    "slug": slug, "display_name": display_name,
+                    "provider": "chatgpt", "active": current == slug,
+                    "capabilities": {"supports_image_input": True, "supports_audio_input": False},
+                })
+        if cursor_passthrough_available():
+            for slug, display_name in cursor_passthrough_display_names().items():
+                rows.append({
+                    "id": slug, "object": "model",
+                    "slug": slug, "display_name": display_name,
+                    "provider": "cursor", "active": current == slug,
+                    "capabilities": {"supports_image_input": True, "supports_audio_input": False},
+                })
+        for m in usable_byok_models(self.settings.load()):
+            rows.append({
+                "id": m.slug, "object": "model",
+                "slug": m.slug, "display_name": m.display_name,
+                "provider": m.provider, "active": current == m.slug,
+                "capabilities": {
+                    "supports_image_input": getattr(m, "supports_image", False),
+                    "supports_audio_input": False,
+                },
+            })
+        return web.json_response({"data": rows, "nextCursor": None})
 
     def _valid_picker_token(self, request: web.Request) -> bool:
         token = request.headers.get(PICKER_TOKEN_HEADER, "")
