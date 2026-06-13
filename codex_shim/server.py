@@ -16,17 +16,20 @@ from urllib.parse import urljoin
 from aiohttp import ClientSession, ClientTimeout, web
 
 def _should_trust_env() -> bool:
-    """Check if local Veee desktop proxy (127.0.0.1:15236) is running.
-    If yes, use trust_env=True so aiohttp can pick up HTTP_PROXY env vars.
-    If no, use trust_env=_should_trust_env() to connect directly (router VPN handles it)."""
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(0.2)
-        result = s.connect_ex(("127.0.0.1", 15236))
-        s.close()
-        return result == 0
-    except Exception:
-        return False
+    """Scan common local proxy ports; if any is running, trust_env=True.
+    Covers ClashX(7890/7892), Surge(6152/6153), Shadowsocks(1080/1087/1088),
+    Veee(15236), and other common VPN proxies."""
+    proxy_ports = (7892, 7890, 7891, 7893, 1080, 1087, 1088,
+                   8080, 8888, 9090, 15236, 6152, 6153)
+    for port in proxy_ports:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.settimeout(0.15)
+                if s.connect_ex(('127.0.0.1', port)) == 0:
+                    return True
+        except Exception:
+            continue
+    return False
 
 from .cursor_passthrough import (
     CURSOR_MODEL_SLUG,
