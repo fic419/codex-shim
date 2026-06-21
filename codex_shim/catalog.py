@@ -50,7 +50,7 @@ def catalog_entry(model: ShimModel) -> dict:
             "web_search_tool_type": "text_and_image",
             "supports_search_tool": True,
             "supports_parallel_tool_calls": True,
-            "experimental_supported_tools": ["computer_use", "web_search", "apply_patch", "local_shell"],
+            "experimental_supported_tools": [],
             "input_modalities": ["text"] if model.no_image_support else ["text", "image"],
             "supports_image_detail_original": not model.no_image_support,
             "shell_type": "shell_command",

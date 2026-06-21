@@ -92,10 +92,14 @@ SIDEBAR_RECENT_THREADS_REPLACEMENT = (
 SIDEBAR_RECENT_THREADS_APPLIED = re.compile(
     r"\.recentConversationSortKey,modelProviders:\[\],archived:!1,sourceKinds:\w+"
 )
-MODEL_LIST_QUERY_NEEDLE = "queryFn:()=>i(`list-models-for-host`,{hostId:a,includeHidden:!0,cursor:null,limit:s})"
+MODEL_LIST_QUERY_NEEDLE = re.compile(
+    r"queryFn:\(\)=>\w+\(`list-models-for-host`,\{"
+    r"hostId:\w+,includeHidden:!0,cursor:null,limit:\w+\}\)"
+)
 MODEL_LIST_QUERY_REPLACEMENT = (
     "queryFn:async()=>await fetch(`http://127.0.0.1:8765/api/desktop-models`).then(e=>e.json())"
 )
+MODEL_LIST_QUERY_APPLIED = re.compile(re.escape(MODEL_LIST_QUERY_REPLACEMENT))
 WEBVIEW_CSP_NEEDLE = "connect-src &#39;self&#39; https://ab.chatgpt.com https://cdn.openai.com;"
 WEBVIEW_CSP_REPLACEMENT = (
     "connect-src &#39;self&#39; http://127.0.0.1:8765 https://ab.chatgpt.com https://cdn.openai.com;"
@@ -940,17 +944,16 @@ def _patch_codex_desktop_bundles(workdir: Path) -> bool | None:
         (
             "shim-mode sidebar provider filter",
             ["app-server-manager-signals-*.js", "*.js"],
-            (SIDEBAR_RECENT_THREADS_NEEDLE,),
-            (SIDEBAR_RECENT_THREADS_REPLACEMENT,),
+            SIDEBAR_RECENT_THREADS_NEEDLE,
             SIDEBAR_RECENT_THREADS_REPLACEMENT,
             SIDEBAR_RECENT_THREADS_APPLIED,
         ),
         (
             "shim desktop model list source",
             ["model-queries-*.js", "*.js"],
-            (MODEL_LIST_QUERY_NEEDLE,),
-            (MODEL_LIST_QUERY_REPLACEMENT,),
+            MODEL_LIST_QUERY_NEEDLE,
             MODEL_LIST_QUERY_REPLACEMENT,
+            MODEL_LIST_QUERY_APPLIED,
         ),
     ]
     changed = False
@@ -971,6 +974,54 @@ def _patch_codex_desktop_bundles(workdir: Path) -> bool | None:
         else:
             print(f"Codex Desktop {label} patch is already applied.")
     return changed
+
+
+def _patch_codex_desktop_csp(workdir: Path) -> bool | None:
+    index = workdir / "webview" / "index.html"
+    if not index.exists():
+        print("Could not find Codex Desktop webview index.html for CSP patch.", file=sys.stderr)
+        return None
+    text = _read_text_lossy(index)
+    if "http://127.0.0.1:8765" in text:
+        print("Codex Desktop webview CSP patch is already applied.")
+        return False
+    pattern = re.compile(r"(connect-src &#39;self&#39;)([^;]*;)")
+    if len(pattern.findall(text)) != 1:
+        print("Could not patch Codex Desktop webview CSP for shim model endpoint.", file=sys.stderr)
+        return None
+    index.write_text(pattern.sub(r"\1 http://127.0.0.1:8765\2", text, count=1))
+    print("Patched Codex Desktop webview CSP for shim model endpoint.")
+    return True
+
+
+def _patch_main_js_repl_overwrite(workdir: Path) -> bool | None:
+    vite_dir = workdir / ".vite" / "build"
+    if not vite_dir.exists():
+        print("Could not find Codex Desktop .vite/build for js_repl overwrite patch.", file=sys.stderr)
+        return None
+    candidates = sorted(vite_dir.glob("main-*.js"))
+    for path in candidates:
+        text = _read_text_lossy(path)
+        if (
+            MAIN_JS_REPL_OVERWRITE_NEEDLE in text
+            or MAIN_JS_REPL_OVERWRITE_REPLACEMENT in text
+        ):
+            result = _replace_once_any(
+                path,
+                (MAIN_JS_REPL_OVERWRITE_NEEDLE,),
+                (MAIN_JS_REPL_OVERWRITE_REPLACEMENT,),
+                MAIN_JS_REPL_OVERWRITE_REPLACEMENT,
+            )
+            if result is None:
+                print("Could not patch js_repl overwrite in Codex Desktop.", file=sys.stderr)
+                return None
+            if result:
+                print("Patched Codex Desktop js_repl overwrite.")
+            else:
+                print("Codex Desktop js_repl overwrite patch is already applied.")
+            return result
+    print("Codex Desktop js_repl overwrite patch needle was not found; skipping.")
+    return False
 
 
 

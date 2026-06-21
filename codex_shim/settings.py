@@ -64,6 +64,8 @@ def _is_listed_gpt_model(entry: dict[str, Any]) -> bool:
     if entry.get("visibility") == "hidden":
         return False
     lower = slug.lower()
+    if lower == "codex-auto":
+        return False
     return lower.startswith("gpt-") or lower.startswith("codex-")
 
 

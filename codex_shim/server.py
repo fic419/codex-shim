@@ -159,39 +159,16 @@ class ShimServer:
         rows: list[dict[str, Any]] = []
         router_config = self._active_router()
         if router_config is not None:
-            rows.append({
-                "id": router_config.slug, "object": "model",
-                "slug": router_config.slug, "display_name": router_config.display_name,
-                "provider": "auto", "active": current == router_config.slug,
-                "capabilities": {"supports_image_input": False, "supports_audio_input": False},
-            })
+            rows.append(_desktop_model(router_config.slug, router_config.display_name, "auto", current == router_config.slug))
         if chatgpt_passthrough_available():
             for slug, display_name in chatgpt_passthrough_display_names().items():
-                rows.append({
-                    "id": slug, "object": "model",
-                    "slug": slug, "display_name": display_name,
-                    "provider": "chatgpt", "active": current == slug,
-                    "capabilities": {"supports_image_input": True, "supports_audio_input": False},
-                })
+                rows.append(_desktop_model(slug, display_name, "chatgpt", current == slug))
         if cursor_passthrough_available():
             for slug, display_name in cursor_passthrough_display_names().items():
-                rows.append({
-                    "id": slug, "object": "model",
-                    "slug": slug, "display_name": display_name,
-                    "provider": "cursor", "active": current == slug,
-                    "capabilities": {"supports_image_input": True, "supports_audio_input": False},
-                })
+                rows.append(_desktop_model(slug, display_name, "cursor", current == slug))
         for m in usable_byok_models(self.settings.load()):
-            rows.append({
-                "id": m.slug, "object": "model",
-                "slug": m.slug, "display_name": m.display_name,
-                "provider": m.provider, "active": current == m.slug,
-                "capabilities": {
-                    "supports_image_input": getattr(m, "supports_image", False),
-                    "supports_audio_input": False,
-                },
-            })
-        return web.json_response({"data": rows, "nextCursor": None})
+            rows.append(_desktop_model(m.slug, m.display_name, m.provider, current == m.slug, m))
+        return web.json_response({"data": rows, "nextCursor": None}, headers=_desktop_model_cors_headers())
 
     def _valid_picker_token(self, request: web.Request) -> bool:
         token = request.headers.get(PICKER_TOKEN_HEADER, "")
@@ -813,7 +790,7 @@ class ShimServer:
         url = _join_url(route.base_url, "/chat/completions")
         headers = _openai_headers(route)
         _dump_debug_request(route.slug, url, body)
-        async with ClientSession(timeout=self.timeout, trust_env=_should_trust_env()) as session:
+        async with ClientSession(timeout=self.timeout) as session:
             upstream = await session.post(url, json=body, headers=headers)
             if upstream.status >= 400:
                 return await _error_response(upstream, slug=route.slug)
@@ -847,7 +824,7 @@ class ShimServer:
     ) -> web.StreamResponse:
         url = _join_url(route.base_url, "/messages")
         headers = _anthropic_headers(route)
-        async with ClientSession(timeout=self.timeout, trust_env=_should_trust_env()) as session:
+        async with ClientSession(timeout=self.timeout) as session:
             upstream = await session.post(url, json=body, headers=headers)
             if upstream.status >= 400:
                 return await _error_response(upstream)
@@ -2139,11 +2116,32 @@ async def _sse_lines(upstream) -> Any:
 
 def _anthropic_stream_to_chat_chunk(event: dict[str, Any], model: str) -> dict[str, Any]:
     content = ""
-    if event.get("type") == "content_block_delta":
+    reasoning = ""
+
+    if event.get("type") == "content_block_start":
+        block = event.get("content_block") or {}
+        btype = block.get("type")
+        if btype == "text":
+            content = block.get("text", "")
+        elif btype in ("thinking", "redacted_thinking"):
+            reasoning = block.get("thinking") or block.get("data") or ""
+
+    elif event.get("type") == "content_block_delta":
         delta = event.get("delta") or {}
-        if delta.get("type") == "text_delta":
+        dtype = delta.get("type")
+        if dtype == "text_delta":
             content = delta.get("text", "")
-    return {"object": "chat.completion.chunk", "model": model, "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}]}
+        elif dtype == "thinking_delta":
+            reasoning = delta.get("thinking", "")
+
+    chunk: dict[str, Any] = {
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [{"index": 0, "delta": {"content": content}, "finish_reason": None}],
+    }
+    if reasoning:
+        chunk["choices"][0]["delta"]["reasoning_content"] = reasoning
+    return chunk
 
 
 def _compact_request_body(body: dict[str, Any], upstream_model: str) -> dict[str, Any]:
@@ -2369,7 +2367,7 @@ def _desktop_model(
         "isDefault": is_default,
         "contextWindow": context,
         "maxContextWindow": context,
-        "experimental_supported_tools": ["computer_use", "web_search", "apply_patch", "local_shell"],
+        "experimental_supported_tools": [],
     }
 
 
